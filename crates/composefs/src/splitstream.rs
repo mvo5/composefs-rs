@@ -10,16 +10,16 @@
  */
 
 use std::{
-    io::{BufReader, Read, Write},
+    io::{BufReader, ErrorKind, Read, Write},
     sync::Arc,
 };
 
-use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 use zstd::stream::{read::Decoder, write::Encoder};
 
 use crate::{
+    fs::{Error, Result},
     fsverity::FsVerityHashValue,
     repository::Repository,
     util::{read_exactish, Sha256Digest},
@@ -205,7 +205,9 @@ impl<ObjectID: FsVerityHashValue> SplitStreamWriter<ObjectID> {
 
         if let Some((context, expected)) = self.sha256 {
             if Into::<Sha256Digest>::into(context.finalize()) != expected {
-                bail!("Content doesn't have expected SHA256 hash value!");
+                return Err(Error::Other(
+                    "Content doesn't have expected SHA256 hash value!".into(),
+                ));
             }
         }
 
@@ -302,13 +304,16 @@ impl<R: Read, ObjectID: FsVerityHashValue> SplitStreamReader<R, ObjectID> {
             match read_u64_le(&mut self.decoder)? {
                 None => {
                     if !eof_ok {
-                        bail!("Unexpected EOF when parsing splitstream");
+                        // or return Err(Error::Other("Unexpected EOF when parsing splitstream".into()));
+                        return Err(Error::Io(std::io::Error::from(ErrorKind::UnexpectedEof)));
                     }
                     return Ok(ChunkType::Eof);
                 }
                 Some(0) => {
                     if !ext_ok {
-                        bail!("Unexpected external reference when parsing splitstream");
+                        return Err(Error::Other(
+                            "Unexpected external reference when parsing splitstream".into(),
+                        ));
                     }
                     let id = ObjectID::read_from_io(&mut self.decoder)?;
                     return Ok(ChunkType::External(id));
@@ -320,7 +325,9 @@ impl<R: Read, ObjectID: FsVerityHashValue> SplitStreamReader<R, ObjectID> {
         }
 
         if self.inline_bytes < expected_bytes {
-            bail!("Unexpectedly small inline content when parsing splitstream");
+            return Err(Error::Other(
+                "Unexpectedly small inline content when parsing splitstream".into(),
+            ));
         }
 
         Ok(ChunkType::Inline)
@@ -435,7 +442,7 @@ impl<R: Read, ObjectID: FsVerityHashValue> SplitStreamReader<R, ObjectID> {
     pub fn lookup(&self, body: &Sha256Digest) -> Result<&ObjectID> {
         match self.refs.lookup(body) {
             Some(id) => Ok(id),
-            None => bail!("Reference is not found in splitstream"),
+            None => Err(Error::Other("Reference is not found in splitstream".into())),
         }
     }
 }

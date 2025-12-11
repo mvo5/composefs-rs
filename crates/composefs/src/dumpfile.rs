@@ -17,11 +17,12 @@ use std::{
     rc::Rc,
 };
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use rustix::fs::FileType;
 
 use crate::{
     dumpfile_parse::{Entry, Item},
+    fs::Result,
     fsverity::FsVerityHashValue,
     tree::{Directory, FileSystem, Inode, Leaf, LeafContent, RegularFile, Stat},
 };

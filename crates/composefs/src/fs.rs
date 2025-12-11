@@ -7,6 +7,7 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap},
+    ffi::FromBytesWithNulError,
     ffi::{CStr, OsStr},
     fs::File,
     io::{Read, Write},
@@ -16,7 +17,7 @@ use std::{
     rc::Rc,
 };
 
-use anyhow::{ensure, Result};
+use hex::FromHexError;
 use rustix::{
     buffer::spare_capacity,
     fd::{AsFd, OwnedFd},
@@ -26,15 +27,85 @@ use rustix::{
     },
     io::{read, Errno},
 };
+use thiserror::Error;
+use tokio::task::JoinError;
 use zerocopy::IntoBytes;
 
 use crate::{
-    fsverity::{compute_verity, FsVerityHashValue},
+    erofs::reader::ErofsReaderError,
+    fsverity::{
+        compute_verity, CompareVerityError, EnableVerityError, FsVerityHashValue,
+        MeasureVerityError,
+    },
     repository::Repository,
     tree::{Directory, FileSystem, Inode, Leaf, LeafContent, RegularFile, Stat},
     util::proc_self_fd,
     INLINE_CONTENT_MAX,
 };
+
+// XXX: move to error.rs ?
+/// Errors returned by this crate.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum Error {
+    #[error("i/o error")]
+    /// An input/output error
+    Io(#[from] std::io::Error),
+
+    #[error("hex decode error")]
+    /// An hex decode error
+    HexError(#[from] FromHexError),
+
+    #[error("eorfs reader error")]
+    /// An erofs reader error
+    ErofsReaderError(#[from] ErofsReaderError),
+
+    #[error("compare verity error")]
+    /// Compare verity error
+    CompareVerityError(#[from] CompareVerityError),
+
+    #[error("mesaure verity error")]
+    /// Measure verity error
+    MeasureVerityError(#[from] MeasureVerityError),
+
+    #[error("tokio join error")]
+    /// Tokio join error
+    JoinError(#[from] JoinError),
+
+    #[error("FmtError")]
+    /// FmtError
+    FmtError(#[from] std::fmt::Error),
+
+    #[error("EnableVerityError")]
+    /// EnableVerityError
+    EnableVerityError(#[from] EnableVerityError),
+
+    #[error("error")]
+    /// An unknown other error
+    Other(Box<str>),
+}
+
+impl From<Errno> for Error {
+    fn from(value: Errno) -> Self {
+        Self::Io(value.into())
+    }
+}
+
+impl From<FromBytesWithNulError> for Error {
+    fn from(value: FromBytesWithNulError) -> Self {
+        Self::Other(value.to_string().into())
+    }
+}
+
+// XXX: remove once everything is ported
+impl From<anyhow::Error> for Error {
+    fn from(value: anyhow::Error) -> Self {
+        Self::Other(value.to_string().into())
+    }
+}
+
+/// The error type returned from this crate.
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Attempt to use O_TMPFILE + rename to atomically set file contents.
 /// Will fall back to a non-atomic write if the target doesn't support O_TMPFILE.
@@ -187,11 +258,11 @@ impl<ObjectID: FsVerityHashValue> FilesystemReader<'_, ObjectID> {
     fn stat(fd: &OwnedFd, ifmt: FileType) -> Result<(rustix::fs::Stat, Stat)> {
         let buf = fstat(fd)?;
 
-        ensure!(
-            FileType::from_raw_mode(buf.st_mode) == ifmt,
-            "File type changed
-            between readdir() and fstat()"
-        );
+        if FileType::from_raw_mode(buf.st_mode) != ifmt {
+            return Err(Error::Other(
+                "File type changed between readdir() and fstat()".into(),
+            ));
+        };
 
         Ok((
             buf,
@@ -364,10 +435,11 @@ pub fn read_file<ObjectID: FsVerityHashValue>(
         RegularFile::External(id, size) => {
             let mut data = Vec::with_capacity(*size as usize);
             std::fs::File::from(repo.open_object(id)?).read_to_end(&mut data)?;
-            ensure!(
-                *size == data.len() as u64,
-                "File content doesn't have the expected length"
-            );
+            if *size != data.len() as u64 {
+                return Err(Error::Other(
+                    "File content doesn't have the expected length".into(),
+                ));
+            };
             Ok(data.into_boxed_slice())
         }
     }

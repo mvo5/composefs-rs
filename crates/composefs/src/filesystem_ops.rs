@@ -4,11 +4,10 @@
 //! FileSystem objects, including computing image IDs, committing to
 //! repositories, and generating dumpfiles.
 
-use anyhow::Result;
-
 use crate::{
     dumpfile::write_dumpfile,
     erofs::writer::mkfs_erofs,
+    fs::Result,
     fsverity::{compute_verity, FsVerityHashValue},
     repository::Repository,
     tree::FileSystem,

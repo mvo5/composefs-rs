@@ -67,7 +67,9 @@ impl<ObjectID: FsVerityHashValue> Downloader<ObjectID> {
     }
 
     fn open_splitstream(&self, id: &ObjectID) -> Result<SplitStreamReader<File, ObjectID>> {
-        SplitStreamReader::new(File::from(self.repo.open_object(id)?))
+        Ok(SplitStreamReader::new(File::from(
+            self.repo.open_object(id)?,
+        ))?)
     }
 
     fn read_object(&self, id: &ObjectID) -> Result<Vec<u8>> {
@@ -208,7 +210,7 @@ impl<ObjectID: FsVerityHashValue> Downloader<ObjectID> {
         for (id, expected_checksum) in splitstreams {
             let mut reader = self.open_splitstream(&id)?;
             let mut context = Sha256::new();
-            reader.cat(&mut context, |id| self.read_object(id))?;
+            reader.cat(&mut context, |id| Ok(Ok(self.read_object(id))??))?;
             let measured_checksum: Sha256Digest = context.finalize().into();
 
             if let Some(expected) = expected_checksum {

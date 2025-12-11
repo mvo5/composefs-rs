@@ -14,7 +14,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::Context;
 use once_cell::sync::OnceCell;
 use rustix::{
     fs::{
@@ -26,6 +26,8 @@ use rustix::{
 use sha2::{Digest, Sha256};
 
 use crate::{
+    fs::Error,
+    fs::Result,
     fsverity::{
         compute_verity, enable_verity_maybe_copy, ensure_verity_equal, measure_verity,
         CompareVerityError, EnableVerityError, FsVerityHashValue, MeasureVerityError,
@@ -218,7 +220,10 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
                 // TODO: strictly, we should measure the newly-appeared file
             }
             Err(other) => {
-                return Err(other).context("Linking created object file");
+                // XXX: proper embed/add context? we loose information here
+                return Err(Error::Other(
+                    format!("{}: Linking created object file", other.to_string()).into(),
+                ));
             }
         }
 
@@ -276,10 +281,9 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
                 // content hash.  That would allow us to reestablish a solid link between
                 // content-sha256 and verity digest.
                 let bytes = target.as_bytes();
-                ensure!(
-                    bytes.starts_with(b"../"),
-                    "stream symlink has incorrect prefix"
-                );
+                if !bytes.starts_with(b"../") {
+                    return Err(Error::Other("stream symlink has incorrect prefix".into()));
+                };
                 Ok(Some(ObjectID::from_object_pathname(bytes)?))
             }
             Err(Errno::NOENT) => Ok(None),
@@ -292,22 +296,26 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
         let stream_path = format!("streams/{}", hex::encode(sha256));
         match self.openat(&stream_path, OFlags::RDONLY) {
             Ok(stream) => {
-                let path = readlinkat(&self.repository, stream_path, [])?;
-                let measured_verity = match measure_verity(&stream) {
-                    Ok(found) => found,
-                    Err(
-                        MeasureVerityError::VerityMissing
-                        | MeasureVerityError::FilesystemNotSupported,
-                    ) if self.insecure => FsVerityHashValue::from_object_pathname(path.to_bytes())?,
-                    Err(other) => Err(other)?,
-                };
+                // XXX: fixme
+                let measured_verity = measure_verity(&stream)?;
+                /*
+                        let path = readlinkat(&self.repository, stream_path, [])?;
+                        let measured_verity = match measure_verity(&stream) {
+                            Ok(found) => found,
+                            Err(
+                                MeasureVerityError::VerityMissing
+                                | MeasureVerityError::FilesystemNotSupported,
+                            ) if self.insecure => FsVerityHashValue::from_object_pathname(path.to_bytes())?,
+                            Err(other) => Err(other),
+                    };
+                */
                 let mut context = Sha256::new();
                 let mut split_stream = SplitStreamReader::new(File::from(stream))?;
 
                 // check the verity of all linked streams
                 for entry in &split_stream.refs.map {
                     if self.check_stream(&entry.body)?.as_ref() != Some(&entry.verity) {
-                        bail!("reference mismatch");
+                        return Err(Error::Other("reference mismatch".into()));
                     }
                 }
 
@@ -318,7 +326,7 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
                     Ok(data)
                 })?;
                 if *sha256 != Into::<[u8; 32]>::into(context.finalize()) {
-                    bail!("Content didn't match!");
+                    return Err(Error::Other("Content didn't match!".into()));
                 }
 
                 Ok(Some(measured_verity))
@@ -336,7 +344,7 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
         reference: Option<&str>,
     ) -> Result<ObjectID> {
         let Some((.., ref sha256)) = writer.sha256 else {
-            bail!("Writer doesn't have sha256 enabled");
+            return Err(Error::Other("Writer doesn't have sha256 enabled".into()));
         };
         let stream_path = format!("streams/{}", hex::encode(sha256));
         let object_id = writer.done()?;
@@ -499,7 +507,7 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
         // A name with no slashes in it is taken to be a sha256 fs-verity digest
         match measure_verity::<ObjectID>(&image) {
             Ok(found) if found == FsVerityHashValue::from_hex(name)? => Ok((image, true)),
-            Ok(_) => bail!("fs-verity content mismatch"),
+            Ok(_) => Err(Error::Other("fs-verity content mismatch".into())),
             Err(MeasureVerityError::VerityMissing | MeasureVerityError::FilesystemNotSupported)
                 if self.insecure =>
             {
@@ -589,7 +597,7 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
                     objects.insert(Self::read_symlink_hashvalue(&fd, entry.file_name())?);
                 }
                 _ => {
-                    bail!("Unexpected file type encountered");
+                    return Err(Error::Other("Unexpected file type encountered".into()));
                 }
             }
         }
@@ -636,7 +644,9 @@ impl<ObjectID: FsVerityHashValue> Repository<ObjectID> {
             let filename = entry.file_name();
             if filename != c"refs" && filename != c"." && filename != c".." {
                 if entry.file_type() != FileType::Symlink {
-                    bail!("category directory contains non-symlink");
+                    return Err(Error::Other(
+                        "category directory contains non-symlink".into(),
+                    ));
                 }
 
                 // TODO: we need to sort this out.  the symlink itself might be a sha256 content ID

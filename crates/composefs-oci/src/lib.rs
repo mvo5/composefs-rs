@@ -58,7 +58,7 @@ pub fn import_layer<ObjectID: FsVerityHashValue>(
     name: Option<&str>,
     tar_stream: &mut impl Read,
 ) -> Result<ObjectID> {
-    repo.ensure_stream(sha256, |writer| tar::split(tar_stream, writer), name)
+    Ok(repo.ensure_stream(sha256, |writer| Ok(tar::split(tar_stream, writer)?), name)?)
 }
 
 /// Lists the contents of a container layer stored in the repository.
@@ -215,7 +215,7 @@ pub fn mount<ObjectID: FsVerityHashValue>(
     let Some(id) = config.get_config_annotation("containers.composefs.fsverity") else {
         bail!("Can only mount sealed containers");
     };
-    repo.mount_at(id, mountpoint)
+    Ok(repo.mount_at(id, mountpoint)?)
 }
 
 #[cfg(test)]
